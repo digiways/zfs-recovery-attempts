@@ -5,6 +5,8 @@
 #include <thread>
 #include <vector>
 
+using namespace zfs_recover;
+
 void search(const std::string& name, const uint8_t* data, size_t data_size, const std::vector<std::string>& tokens, size_t max_distance)
 {
 	printf("Starting searching '%s'\n", name.c_str());
