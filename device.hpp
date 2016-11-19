@@ -6,6 +6,7 @@
 #include <unistd.h>
 #include <stdexcept>
 #include <string.h>
+#include <linux/fs.h>
 
 class Device
 {
@@ -24,6 +25,11 @@ public:
 		if (res != 0)
 			throw std::runtime_error("Error calling fstat on " + filename);
 		size_ = st.st_size;
+
+		if (size_ == 0)
+		{
+			::ioctl(file_, BLKGETSIZE64, &size_);
+		}
 
 		mapping_addr_ = static_cast<uint8_t*>(::mmap(0, size_, PROT_READ, MAP_SHARED, file_, 0));
 		if (mapping_addr_ == MAP_FAILED)
