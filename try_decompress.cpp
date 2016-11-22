@@ -8,7 +8,7 @@
 
 int main()
 {
-	using namespace zfs_recover;
+	using namespace zfs_recover_tools;
 
 	Device device("data1-compressed.bin");
 	std::vector<std::vector<uint8_t>> data = try_decompress(device.data(), device.size());

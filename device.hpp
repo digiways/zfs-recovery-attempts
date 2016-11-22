@@ -11,7 +11,7 @@
 #include <string.h>
 #include <linux/fs.h>
 
-namespace zfs_recover
+namespace zfs_recover_tools
 {
 	class Device
 	{
@@ -48,12 +48,20 @@ namespace zfs_recover
 
 		~Device()
 		{
-			::munmap(mapping_addr_, size_);
-			::close(file_);
+			if (mapping_addr_)
+				::munmap(mapping_addr_, size_);
+			if (file_)
+				::close(file_);
 		}
 
 		Device(const Device&) = delete;
 		Device& operator=(const Device&) = delete;
+		Device(Device&& rhs) : name_(std::move(rhs.name_)), file_(rhs.file_), mapping_addr_(rhs.mapping_addr_), size_(rhs.size_)
+		{
+			rhs.mapping_addr_ = nullptr;
+			rhs.file_ = 0;
+			rhs.size_ = 0;
+		}
 
 		const std::string& name() const { return name_; }
 		size_t size() const { return size_; }
@@ -65,4 +73,4 @@ namespace zfs_recover
 		uint8_t* mapping_addr_;
 		size_t size_;
 	};
-} // namespace zfs_recover
+} // namespace zfs_recover_tools

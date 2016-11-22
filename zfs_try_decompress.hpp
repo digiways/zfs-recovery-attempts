@@ -7,7 +7,7 @@
 #include <iostream>
 #include <sstream>
 
-namespace zfs_recover
+namespace zfs_recover_tools
 {
 
 	struct decompression_error
@@ -242,4 +242,4 @@ std::vector<std::vector<uint8_t>> try_decompress(const uint8_t* data, size_t siz
 	return all;
 }
 
-} // namespace zfs_recover
+} // namespace zfs_recover_tools
