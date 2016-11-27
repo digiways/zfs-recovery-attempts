@@ -1,1 +1,1 @@
-g++ load_direntry.cpp -std=c++14 -isystem ../../zfs-0.6.5.8/include -isystem ../../zfs-0.6.5.8/lib/libspl/include -fpermissive -o bin/zfs_load_direntry ../zfs/lib/libzpool/.libs/libzpool.so
+g++ load_direntry.cpp -std=c++14 -isystem ../zfs/include -isystem ../zfs/lib/libspl/include -fpermissive -o bin/zfs_load_direntry ../zfs/lib/libzpool/.libs/libzpool.so -pthread -O3 -D_LARGEFILE64_SOURCE -D_FILE_OFFSET_BITS=64

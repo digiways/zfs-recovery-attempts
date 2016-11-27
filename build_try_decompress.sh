@@ -1,1 +1,1 @@
-g++ -std=c++14 try_decompress.cpp -o bin/try_decompress
+g++ -std=c++14 try_decompress.cpp -o bin/try_decompress -O3 -g -fsanitize=address -lboost_program_options -isystem ../zfs/include -isystem ../zfs/lib/libspl/include -fpermissive ../zfs/lib/libzpool/.libs/libzpool.so
