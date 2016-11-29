@@ -1,1 +1,1 @@
-g++ block_pointer_scanner.cpp -std=c++14 -isystem ../zfs/include -isystem ../zfs/lib/libspl/include -fpermissive -o bin/zfs_block_pointer_scanner ../zfs/lib/libzpool/.libs/libzpool.so -pthread -O3 -D_LARGEFILE64_SOURCE -D_FILE_OFFSET_BITS=64 -lboost_program_options
+g++ -O3 block_pointer_scanner.cpp -std=c++14 -I../sparsehash/src -isystem ../zfs/include -isystem ../zfs/lib/libspl/include -fpermissive -o bin/zfs_block_pointer_scanner ../zfs/lib/libzpool/.libs/libzpool.so -pthread -D_LARGEFILE64_SOURCE -D_FILE_OFFSET_BITS=64 -lboost_program_options

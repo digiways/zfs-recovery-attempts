@@ -28,6 +28,7 @@ namespace zfs_recover_tools
 		}
 	};
 
+// returns size of input data used
 template<size_t SIZE_COUNT>
 size_t lzjb_decompress(const uint8_t* const src, const std::array<size_t, SIZE_COUNT>& try_sizes, std::vector<uint8_t>& out, decompression_error& error)
 {
@@ -131,12 +132,14 @@ size_t lzjb_decompress(const uint8_t* const src, const std::array<size_t, SIZE_C
 	return 0;
 }
 
+// returns size of input data used
 size_t lzjb_decompress(const uint8_t* const src, size_t size, std::vector<uint8_t>& out, decompression_error& error)
 {
 	return lzjb_decompress(src, std::array<size_t, 1>{size}, out, error);
 }
 
 
+// returns size of input data used
 template<size_t SIZE_COUNT>
 size_t zle_decompress(const uint8_t* const src, const std::array<size_t, SIZE_COUNT>& try_sizes, std::vector<uint8_t>& out, decompression_error& error)
 {
@@ -197,12 +200,14 @@ size_t zle_decompress(const uint8_t* const src, const std::array<size_t, SIZE_CO
 	return 0;
 }
 
+// returns size of input data used
 size_t zle_decompress(const uint8_t* const src, size_t size, std::vector<uint8_t>& out, decompression_error& error)
 {
 	return zle_decompress(src, std::array<size_t, 1>{size}, out, error);
 }
 
 
+// returns size of input data used
 template<size_t SIZE_COUNT>
 size_t lz4_decompress(const uint8_t* const src, const std::array<size_t, SIZE_COUNT>& try_sizes, std::vector<uint8_t>& out, decompression_error& error)
 {
@@ -313,6 +318,7 @@ size_t lz4_decompress(const uint8_t* const src, const std::array<size_t, SIZE_CO
 	throw std::runtime_error("can't happen");
 }
 
+// returns size of input data used
 size_t lz4_decompress(const uint8_t* const src, size_t size, std::vector<uint8_t>& out, decompression_error& error)
 {
 	return lz4_decompress(src, std::array<size_t, 1>{size}, out, error);
@@ -338,7 +344,6 @@ struct zfs_decompressed_block_data_storage_t
 	zfs_decompressed_block_data_storage_t& operator=(zfs_decompressed_block_data_storage_t&&) = delete;
 };
 
-// returns number of succesfully decompressed data blocks
 // try_sizes must be in increasing order
 template<size_t SIZE_COUNT>
 void try_decompress(const uint8_t* data, const std::array<size_t, SIZE_COUNT>& try_sizes, zfs_decompressed_block_data_storage_t& out, std::ostream* error_log = nullptr)
