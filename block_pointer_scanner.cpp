@@ -211,11 +211,17 @@ namespace zfs_recover_tools
 		void scan_dnodes(zfs_pool& pool, const std::vector<zfs_data_address>& to_find)
 		{
 			std::vector<uint8_t> decompressed;
+			uint64_t update_count = 0;
 			scan_all(
 				0,
 				true,
 				[&](size_t file_idx, size_t file_pos, const zfs_data_address& addr, const std::vector<block_pointer_info>& bpis)
 				{
+					++update_count;
+					if (update_count % 10000 == 0)
+					{
+						std::cout << "Scanning at file " << file_idx << ", pos " << file_pos << ", addr " << addr << std::endl ;
+					}
 					for (const block_pointer_info& bpi : bpis)
 					{
 						if (bpi.type == DMU_OT_DNODE && bpi.level == 0)
@@ -231,7 +237,11 @@ namespace zfs_recover_tools
 							}
 							static_assert(sizeof(dnode_phys_t) == 512, "");
 							if (decompressed.size() % 512 != 0)
-								throw std::runtime_error("Invalid DNode block, got size: " + std::to_string(decompressed.size()));
+							{
+								// TODO: Check why we get so many nodes with invalid sizes, maybe that's expected
+								//std::cout << "Skipping DNode block with invalid size " << bpi << ", size: " << decompressed.size() << std::endl ;
+								continue;
+							}
 							size_t count = decompressed.size() / 512;
 							for (size_t i = 0; i != count; ++i)
 							{
@@ -268,12 +278,12 @@ namespace zfs_recover_tools
 			zfs_data_address addr;
 			std::vector<block_pointer_info> bpis;
 		};
-		void get_parents(const zfs_data_address& addr_to_find, std::vector<Parent>& parent_bpis, size_t max_offset_in_sectors = 0)
+		void get_parents(const zfs_data_address& addr_to_find, std::vector<Parent>& parent_bpis, size_t max_left_offset_in_sectors = 0, size_t max_right_offset_in_sectors = 0)
 		{
 			parent_bpis.clear();
 			std::vector<uint64_t> direct_parents;
 			std::vector<uint64_t> all_considered_direct_parents;
-			for (int64_t addr_offset = -static_cast<int64_t>(max_offset_in_sectors); addr_offset != max_offset_in_sectors+1; ++addr_offset)
+			for (int64_t addr_offset = -static_cast<int64_t>(max_left_offset_in_sectors); addr_offset != max_right_offset_in_sectors+1; ++addr_offset)
 			{
 				direct_parents.clear();
 				bp_tree_.find_parents(zfs_data_address{addr_to_find.vdev_id, addr_to_find.offset + addr_offset, addr_to_find.size}, direct_parents);
@@ -332,7 +342,8 @@ int main(int argc, const char** argv)
 		std::string dva_str_to_find_references_for;
 		std::string filename_to_find_references_for;
 		bool try_read_direntries = false;
-		size_t find_address_references_max_offset_in_sectors = 32;
+		size_t find_address_references_max_left_offset_in_sectors = 32;
+		size_t find_address_references_max_right_offset_in_sectors = 32;
 		bool scan_dnodes = false;
 
 		po::options_description desc("Allowed options");
@@ -347,7 +358,8 @@ int main(int argc, const char** argv)
 			("find-address-references", po::value(&dva_str_to_find_references_for), "find references for address in form vdev_id:offset::size, size is ignored, this option enables construction of the block pointer tree")
 			("find-address-references-from-file", po::value(&filename_to_find_references_for), "filename that cotains references for address in form vdev_id:offset::size, size is ignored (or alternative syntax with device names), this option enables construction of the block pointer tree")
 			("try-read-direntries", po::value(&try_read_direntries)->implicit_value(true)->zero_tokens(), "try to parse matched parent data as directory entries")
-			("find-address-references-max-offset-in-sectors", po::value(&find_address_references_max_offset_in_sectors)->default_value(32), "max offset in sectors when trying to find references to an offset")
+			("find-address-references-max-left-offset-in-sectors", po::value(&find_address_references_max_left_offset_in_sectors)->default_value(32), "max offset in sectors when trying to find references to an offset")
+			("find-address-references-max-right-offset-in-sectors", po::value(&find_address_references_max_right_offset_in_sectors)->default_value(0), "max offset in sectors when trying to find references to an offset")
 			("scan-dnodes", po::value(&scan_dnodes)->implicit_value(true)->zero_tokens(), "scan dnodes")
 			;
 
@@ -417,7 +429,7 @@ int main(int argc, const char** argv)
 			{
 				std::vector<block_pointer_tree_state_t::Parent> parents;
 				std::cout << "Searching for parents of " << addr_to_find << std::endl ;
-				bptree_state.get_parents(addr_to_find, parents, find_address_references_max_offset_in_sectors);
+				bptree_state.get_parents(addr_to_find, parents, find_address_references_max_left_offset_in_sectors, find_address_references_max_right_offset_in_sectors);
 				for (const block_pointer_tree_state_t::Parent& parent : parents)
 				{
 					bool is_object_directory = true;
@@ -434,7 +446,8 @@ int main(int argc, const char** argv)
 						std::cout << "parent dva: " << parent.addr << ", child dva: " << addr_to_find << std::endl ;
 						for (const block_pointer_info& bpi : parent.bpis)
 							std::cout << "\t" << bpi << std::endl ;
-						print_parent_tree(bptree_state, parent.addr);
+						if (is_object_directory)
+							print_parent_tree(bptree_state, parent.addr);
 					}
 					if (is_object_directory && try_read_direntries)
 					{

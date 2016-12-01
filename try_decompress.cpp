@@ -14,6 +14,55 @@
 
 using namespace zfs_recover_tools;
 
+size_t try_parse_data_as_dmu_block(zfs_pool* pool, const uint8_t* data, size_t size, size_t start_idx, size_t& unallocated_count, size_t& allocated_count)
+{
+	//1:d0bd231000:1000
+	static_assert(sizeof(dnode_phys_t) == 512, "");
+	if (size % 512 != 0)
+	{
+		std::cerr << "Skipping DNode block with invalid size, size: " << size << std::endl ;
+		return 0;
+	}
+	else
+	{
+		size_t count = size/512;
+		for (size_t i = 0; i != count; ++i)
+		{
+			const dnode_phys_t& node = get_mem_pod<dnode_phys_t>(data, i * 512, size);
+			std::cout << "idx=" << (start_idx + i)
+					<< ", type: " << dmu_ot[node.dn_type].ot_name
+					<< ", dn_extra_slots=" << (int)node.dn_extra_slots
+					<< ", bonustype=" << (int)node.dn_bonustype
+					<< ", dn_indblkshift=" << (int)node.dn_indblkshift
+					<< ", dn_datablkszsec=" << (int)node.dn_datablkszsec
+					<< ", flags=" << (int)node.dn_flags
+					<< std::endl ;
+			if (node.dn_type == DMU_OT_NONE)
+				++unallocated_count;
+			else
+				++allocated_count;
+			if (node.dn_nblkptr != 0)
+			{
+				//printf("dnode got %u block pointers\n", uint32_t(node.dn_nblkptr));
+				for (size_t i = 0; i!= node.dn_nblkptr; ++i)
+				{
+					block_pointer_info info;
+					int parse_res = try_parse_block_pointer(pool, node.dn_blkptr[i], info);
+					if (parse_res > 0)
+					{
+						for (const zfs_data_address& addr : info.address)
+							if (is_valid(addr))
+							{
+								std::cout << addr << std::endl ;
+							}
+					}
+				}
+			}
+		}
+		return count;
+	}
+}
+
 void try_decompress(
 	zfs_pool* pool,
 	const uint8_t* data,
@@ -21,50 +70,112 @@ void try_decompress(
 	const std::string& output_filename,
 	bool store_all,
 	bool try_parse_as_indirect_block,
+	bool try_parse_as_dmu_block,
 	RWFile* store_all_indirect_block_data
 	)
 {
 	zfs_decompressed_block_data_storage_t decompressed_data;
 	try_decompress(data, std::array<size_t, 1>{data_size}, decompressed_data, &std::cout);
 	size_t count = decompressed_data.decompressed_blocks.size();
-	const auto& decompressed_views = decompressed_data.decompressed_blocks;
+	const std::vector<decompressed_data_view_t>& decompressed_views = decompressed_data.decompressed_blocks;
 	if (count == 0)
 		throw std::runtime_error("All decompression attempts failed");
 	else if (count != 1)
 		printf("More than one decompression attempt succeeded\n");
 
+	size_t dmu_block_idx = 0;
+
 	for (size_t attempt = 0; attempt != count; ++attempt)
 	{
+		decompressed_data_view_t data = decompressed_views[attempt];
 		if (store_all)
 		{
 			std::ofstream f(output_filename + ((count!= 1) ? ("-decompressed-maybe-" + std::to_string(attempt) + ".bin") : "-decompressed.bin"));
-			f.write(reinterpret_cast<const char*>(decompressed_views[attempt].data()), decompressed_views[attempt].size());
+			f.write(reinterpret_cast<const char*>(data.data()), data.size());
 		}
 
 		if (try_parse_as_indirect_block)
 		{
 			std::vector<block_pointer_info> results;
-			bool success = try_parse_indirect_block(pool, decompressed_views[attempt].data(), decompressed_views[attempt].size(), results);
+			bool success = try_parse_indirect_block(pool, data.data(), data.size(), results);
 			if (success)
 			{
-				std::cout << "Parsed decompression attempt " << attempt << " as a direct block [decompressed size " << decompressed_views[attempt].size() << "]" << std::endl ;
+				std::cout << "Parsed decompression attempt " << attempt << " as indirect block [decompressed size " << data.size() << "]" << std::endl ;
 				for (const auto& result : results)
 					std::cout << "\t\t" << result << std::endl ;
 
-				if (store_all_indirect_block_data != nullptr)
+				if (store_all_indirect_block_data != nullptr || try_parse_as_dmu_block)
 				{
+					size_t level1_fill_count = 0;
+					size_t level0_unallocated_count = 0;
+					size_t level0_allocated_count = 0;
+					size_t level1_total_size = 0;
+					size_t level1_total_size_from_bpi = 0;
+					size_t level0_bpi_count = 0;
+					size_t level0_fill_count = 0;
+					size_t expected_obj_id_at_level1_start = 0;
 					read_data_from_block_pointers(
 						*pool,
 						results,
-						[&store_all_indirect_block_data](const uint8_t* data, size_t size) { store_all_indirect_block_data->write(data, size); }
+						[&](const uint8_t* data, size_t size, const block_pointer_info& bpi)
+						{
+							if (bpi.level == 0)
+							{
+								level1_total_size_from_bpi += bpi.data_size;
+								level0_fill_count += bpi.fill_count;
+								level1_total_size += size;
+								++level0_bpi_count;
+								if (try_parse_as_dmu_block)
+								{
+									dmu_block_idx += try_parse_data_as_dmu_block(pool, data, size, dmu_block_idx, level0_unallocated_count, level0_allocated_count);
+									//dmu_block_idx += bpi.fill_count;
+								}
+
+								if (store_all_indirect_block_data)
+									store_all_indirect_block_data->write(data, size);
+							}
+							else if (bpi.level == 1)
+							{
+								if (expected_obj_id_at_level1_start != dmu_block_idx)
+								{
+									dmu_block_idx = expected_obj_id_at_level1_start;
+									printf("expected_obj_id_at_level1_start=%lu, dmu_block_idx=%lu\n", expected_obj_id_at_level1_start, dmu_block_idx);
+									//throw std::runtime_error("foobar");
+								}
+								printf(
+									"level0_unallocated_count=%lu, level1_fill_count=%lu, sum=%lu, level0_allocated_count=%lu, level1_total_size=%lu, level1_total_size_from_bpi=%lu, level0_bpi_count=%lu, level0_fill_count=%lu\n",
+									level0_unallocated_count,
+									level1_fill_count,
+									level1_fill_count+level0_unallocated_count,
+									level0_allocated_count,
+									level1_total_size,
+									level1_total_size_from_bpi,
+									level0_bpi_count,
+									level0_fill_count
+									);
+
+								level0_unallocated_count = 0;
+								level0_allocated_count = 0;
+								level1_fill_count = bpi.fill_count;
+								level1_total_size = 0;
+								level1_total_size_from_bpi = 0;
+								level0_bpi_count = 0;
+								level0_fill_count = 0;
+								expected_obj_id_at_level1_start += (bpi.data_size / sizeof(blkptr_t)) * (bpi.data_size / sizeof(dnode_phys_t));
+							}
+						}
 						);
 				}
 
-				try_read_direntry(*pool, results);
+				//try_read_direntry(*pool, results);
 			}
 			else
-				std::cout << "Failed to parse decompression attempt " << attempt << " as a direct block" << std::endl ;
+				std::cout << "Failed to parse decompression attempt " << attempt << " as indirect block" << std::endl ;
 		}
+		size_t level0_unallocated_count = 0;
+		size_t level0_allocated_count = 0;
+		if (try_parse_as_dmu_block)
+			dmu_block_idx += try_parse_data_as_dmu_block(pool, data.data(), data.size(), dmu_block_idx, level0_unallocated_count, level0_allocated_count);
 	}
 }
 
@@ -80,6 +191,7 @@ int main(int argc, const char** argv)
 		p.add("source", -1);
 
 		bool try_parse_as_indirect_block = false;
+		bool try_parse_as_dmu_block = false;
 		bool store_all = false;
 		std::string store_all_indirect_block_data_filename;
 
@@ -90,6 +202,7 @@ int main(int argc, const char** argv)
 			("zfs-cfg", po::value<std::string>(), "file with zfs configuration")
 			("store-all", po::value(&store_all)->implicit_value(true)->zero_tokens(), "store all raw and decompressed results")
 			("try-parse-as-indirect-block", po::value(&try_parse_as_indirect_block)->implicit_value(true)->zero_tokens(), "try parse as an indirect block")
+			("try-parse-as-dmu-block", po::value(&try_parse_as_dmu_block)->implicit_value(true)->zero_tokens(), "try parse as DMU block")
 			("store-all-indirect-block-data", po::value(&store_all_indirect_block_data_filename), "Filename to store data")
 			;
 
@@ -120,7 +233,7 @@ int main(int argc, const char** argv)
 			{
 				ROFile source_file(source);
 				std::vector<uint8_t> data = source_file.read();
-				try_decompress(pool.get(), data.data(), data.size(), source, store_all, try_parse_as_indirect_block, out_file.get());
+				try_decompress(pool.get(), data.data(), data.size(), source, store_all, try_parse_as_indirect_block, try_parse_as_dmu_block, out_file.get());
 			}
 			else
 			{
@@ -144,7 +257,7 @@ int main(int argc, const char** argv)
 					f.write(reinterpret_cast<const char*>(view.data()), view.size());
 				}
 
-				try_decompress(pool.get(), view.data(), view.size(), output_file_name, store_all, try_parse_as_indirect_block, out_file.get());
+				try_decompress(pool.get(), view.data(), view.size(), output_file_name, store_all, try_parse_as_indirect_block, try_parse_as_dmu_block, out_file.get());
 			}
 		}
 		return 0;

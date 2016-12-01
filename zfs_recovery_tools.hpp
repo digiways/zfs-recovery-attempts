@@ -224,12 +224,12 @@ namespace zfs_recover_tools
 	    std::vector<zap_entry> ret;
 	    ret.reserve(header.zap_num_entries);
 	    int bs = highBit(BlockSizeInBytes);
-	    printf("bs=%u\n", bs);
+	    //printf("bs=%u\n", bs);
 	    const uint8_t* end = ptr + length;
 
 	    //--bs;
 	    std::vector<uint64_t> blkIds;
-	    printf("header.zap_ptrtbl.zt_numblks=%u\n", int(header.zap_ptrtbl.zt_numblks));
+	    //printf("header.zap_ptrtbl.zt_numblks=%u\n", int(header.zap_ptrtbl.zt_numblks));
 	    while (true)
 	    {
 	    	if (header.zap_ptrtbl.zt_numblks == 0)
@@ -254,7 +254,7 @@ namespace zfs_recover_tools
 	    std::sort(blkIds.begin(), blkIds.end());
 	    blkIds.erase(std::unique(blkIds.begin(), blkIds.end()), blkIds.end());
 
-	    printf("blkIds.size()=%u\n", int(blkIds.size()));
+	    //printf("blkIds.size()=%u\n", int(blkIds.size()));
 	    if (blkIds.empty())
 	    	throw std::runtime_error("blkIds is empty");
 
@@ -278,18 +278,18 @@ namespace zfs_recover_tools
 	    	}
 	    	if (base_offset == 0)
 	    		throw std::runtime_error("ZAP_LEAF_MAGIC not found");
-	    	printf("base_offset=%lu\n", base_offset);
-	    	printf("blkIds[0]=%u, (blkIds[0] << bs)=%u\n", int(blkIds[0]), int((blkIds[0] << bs)));
+	    	//printf("base_offset=%lu\n", base_offset);
+	    	//printf("blkIds[0]=%u, (blkIds[0] << bs)=%u\n", int(blkIds[0]), int((blkIds[0] << bs)));
 	    	base_offset -= (blkIds[0] << bs);
-			printf("base_offset=%lu\n", base_offset);
+			//printf("base_offset=%lu\n", base_offset);
 	    }
 	    for (uint64_t blkid : blkIds)
 	    {
-	    	printf("blkid=%lu\n", blkid);
+	    	//printf("blkid=%lu\n", blkid);
 	        long offset = base_offset + (blkid << bs);
-	        printf("offset=%lu, base_offset=%lu, blkid=%lu, bs=%u, length=%lu\n", uint64_t(offset), base_offset, uint64_t(blkid), int(bs), length);
+	        //printf("offset=%lu, base_offset=%lu, blkid=%lu, bs=%u, length=%lu\n", uint64_t(offset), base_offset, uint64_t(blkid), int(bs), length);
 	        const zap_leaf_phys_t::zap_leaf_header& leaf = get_mem_pod<zap_leaf_phys_t::zap_leaf_header>(ptr, offset, length);
-	        printf("got leaf, lh_block_type=%lx, nentries=%u\n", leaf.lh_block_type, int(leaf.lh_nentries));
+	        //printf("got leaf, lh_block_type=%lx, nentries=%u\n", leaf.lh_block_type, int(leaf.lh_nentries));
 	        if (leaf.lh_magic != ZAP_LEAF_MAGIC)
 	            throw std::runtime_error("wrong lh_magic");
 	        if (leaf.lh_block_type != ZBT_LEAF)
@@ -298,10 +298,10 @@ namespace zfs_recover_tools
 	        	err << "leaf.lh_block_type is not ZBT_LEAF, but " << std::hex << leaf.lh_block_type;
 	        	throw std::runtime_error(err.str());
 	        }
-	        printf("bs=%u\n", int(bs));
+	        //printf("bs=%u\n", int(bs));
 	        int numHashEntries = 1 << (bs - 5);
 
-	        printf("numHashEntries = %u\n", numHashEntries);
+	        //printf("numHashEntries = %u\n", numHashEntries);
 
 	        std::set<ushort> hashEntries;
 
@@ -511,6 +511,7 @@ namespace zfs_recover_tools
 	}
 
 	inline bool is_valid(const zfs_data_address& addr) { return addr.size != 0 || addr.offset != 0; }
+	inline bool is_zero(const zfs_data_address& addr) { return addr.size == 0 && addr.offset == 0 && addr.vdev_id == 0; }
 
 	zfs_data_address dva_from_raw_offset(uint32_t vdev_id, uint64_t offset, size_t size)
 	{
@@ -523,9 +524,11 @@ namespace zfs_recover_tools
 		zfs_data_address address[SPA_DVAS_PER_BP] = {};
 		bool address_gang_flag[SPA_DVAS_PER_BP] = {};
 		uint8_t compression_algo_idx = 0;
-		uint8_t level = 0xFF;
-		uint8_t type = 0xFF;
+		uint8_t level = 0;
+		uint8_t type = 0;
 		uint64_t tgx = 0;
+		uint32_t fill_count = 0;
+		uint64_t data_size = 0;
 	};
 
 	std::ostream& operator << (std::ostream& os, const block_pointer_info& info)
@@ -550,6 +553,8 @@ namespace zfs_recover_tools
 		else
 			os << ", type=INVALID[" << (unsigned)info.type << ']';
 		os << ", tgx=" << std::dec << info.tgx ;
+		os << ", fill_count=" << info.fill_count ;
+		os << ", data_size=" << info.data_size ;
 		os << "}" ;
 
 		return os;
@@ -754,6 +759,13 @@ namespace zfs_recover_tools
 
 		size_t valid_ptr_count = 0;
 
+		info.compression_algo_idx = BP_GET_COMPRESS(&ptr);
+		info.level = BP_GET_LEVEL(&ptr);
+		info.type = BP_GET_TYPE(&ptr);
+		info.tgx = BP_PHYSICAL_BIRTH(&ptr);
+		info.fill_count = BP_GET_FILL(&ptr);
+		info.data_size = BP_GET_LSIZE(&ptr);
+
 		if (!(BP_IS_HOLE(&ptr)))
 		{
 			std::array<uint64_t, SPA_DVAS_PER_BP> offsets;
@@ -774,16 +786,14 @@ namespace zfs_recover_tools
 				info.address[dva_idx].offset = offset;
 				info.address[dva_idx].size = size;
 				info.address_gang_flag[dva_idx] = DVA_GET_GANG(&ptr.blk_dva[dva_idx]);
+				if (info.address_gang_flag[dva_idx])
+					throw std::runtime_error("gang?");
 			}
 			static_assert(SPA_DVAS_PER_BP == 3, "");
-			if (offsets[0] == 0 && offsets[1] == 0 && offsets[2] == 0)
+			if ((offsets[0] == 0 && offsets[1] == 0 && offsets[2] == 0) && info.data_size == 0)
 			{
 				return -1;
 			}
-			info.compression_algo_idx = BP_GET_COMPRESS(&ptr);
-			info.level = BP_GET_LEVEL(&ptr);
-			info.type = BP_GET_TYPE(&ptr);
-			info.tgx = BP_PHYSICAL_BIRTH(&ptr);
 		}
 		return valid_ptr_count;
 	}
@@ -807,13 +817,8 @@ namespace zfs_recover_tools
 				return false;
 			}
 			valid_ptr_count += parse_res;
-			if (parse_res != 0)
+			if (parse_res != 0 || info.data_size != 0)
 				results.push_back(info);
-		}
-		if (valid_ptr_count == 0)
-		{
-			results.resize(results_initial_size);
-			return false;
 		}
 
 		return true;
@@ -1229,18 +1234,25 @@ namespace zfs_recover_tools
 	template<class Receiver>
 	void read_data_from_block_pointer(zfs_pool& pool, const block_pointer_info& bpi, const Receiver& receiver)
 	{
-		//std::cout << "Reading from bpi: " << bpi << std::endl ;
-		data_view_t block = pool.get_block(bpi.address[0]);
-
 		std::vector<uint8_t> decompressed;
-		decompress(bpi.compression_algo_idx, block.data(), block.size(), decompressed);
-
-		if (bpi.level == 0)
+		std::cout << "Reading from bpi: " << bpi << std::endl ;
+		if (is_zero(bpi.address[0]) && is_zero(bpi.address[1]) && is_zero(bpi.address[2]) && bpi.data_size != 0)
 		{
-			receiver(decompressed.data(), decompressed.size());
+			decompressed.resize(bpi.data_size);
 		}
 		else
 		{
+			data_view_t block = pool.get_block(bpi.address[0]);
+			decompress(bpi.compression_algo_idx, block.data(), block.size(), decompressed);
+		}
+
+		if (bpi.level == 0)
+		{
+			receiver(decompressed.data(), decompressed.size(), bpi);
+		}
+		else
+		{
+			receiver(0, 0, bpi);
 			std::vector<block_pointer_info> child_bpis;
 			if (!try_parse_indirect_block(&pool, decompressed.data(), decompressed.size(), child_bpis))
 				throw std::runtime_error("Error parsing indirect block");
