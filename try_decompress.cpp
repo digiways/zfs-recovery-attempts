@@ -14,55 +14,6 @@
 
 using namespace zfs_recover_tools;
 
-size_t try_parse_data_as_dmu_block(zfs_pool* pool, const uint8_t* data, size_t size, size_t start_idx, size_t& unallocated_count, size_t& allocated_count)
-{
-	//1:d0bd231000:1000
-	static_assert(sizeof(dnode_phys_t) == 512, "");
-	if (size % 512 != 0)
-	{
-		std::cerr << "Skipping DNode block with invalid size, size: " << size << std::endl ;
-		return 0;
-	}
-	else
-	{
-		size_t count = size/512;
-		for (size_t i = 0; i != count; ++i)
-		{
-			const dnode_phys_t& node = get_mem_pod<dnode_phys_t>(data, i * 512, size);
-			std::cout << "idx=" << (start_idx + i)
-					<< ", type: " << dmu_ot[node.dn_type].ot_name
-					<< ", dn_extra_slots=" << (int)node.dn_extra_slots
-					<< ", bonustype=" << (int)node.dn_bonustype
-					<< ", dn_indblkshift=" << (int)node.dn_indblkshift
-					<< ", dn_datablkszsec=" << (int)node.dn_datablkszsec
-					<< ", flags=" << (int)node.dn_flags
-					<< std::endl ;
-			if (node.dn_type == DMU_OT_NONE)
-				++unallocated_count;
-			else
-				++allocated_count;
-			if (node.dn_nblkptr != 0)
-			{
-				//printf("dnode got %u block pointers\n", uint32_t(node.dn_nblkptr));
-				for (size_t i = 0; i!= node.dn_nblkptr; ++i)
-				{
-					block_pointer_info info;
-					int parse_res = try_parse_block_pointer(pool, node.dn_blkptr[i], info);
-					if (parse_res > 0)
-					{
-						for (const zfs_data_address& addr : info.address)
-							if (is_valid(addr))
-							{
-								std::cout << addr << std::endl ;
-							}
-					}
-				}
-			}
-		}
-		return count;
-	}
-}
-
 void try_decompress(
 	zfs_pool* pool,
 	const uint8_t* data,
@@ -71,6 +22,7 @@ void try_decompress(
 	bool store_all,
 	bool try_parse_as_indirect_block,
 	bool try_parse_as_dmu_block,
+	bool try_parse_as_direntry,
 	RWFile* store_all_indirect_block_data
 	)
 {
@@ -127,7 +79,20 @@ void try_decompress(
 								++level0_bpi_count;
 								if (try_parse_as_dmu_block)
 								{
-									dmu_block_idx += try_parse_data_as_dmu_block(pool, data, size, dmu_block_idx, level0_unallocated_count, level0_allocated_count);
+									std::vector<dnode_phys_t> dnodes;
+									try_parse_data_as_dmu_block(pool, data, size, dmu_block_idx, level0_unallocated_count, level0_allocated_count, dnodes);
+									for (size_t i = 0; i != dnodes.size(); ++i)
+									{
+										uint64_t idx = dmu_block_idx + i;
+										std::cout << "idx=" << idx << dnodes[i] << std::endl ;
+									}
+									size_t count = dnodes.size();
+									size_t count2 = size/512;
+									dmu_block_idx += count;
+									if (count != count2)
+										fprintf(stderr, "count=%lu, count2=%lu\n", count, (size_t)count2);
+									//if (count != bpi.fill_count)
+//										throw std::runtime_error("foobar");
 									//dmu_block_idx += bpi.fill_count;
 								}
 
@@ -163,19 +128,19 @@ void try_decompress(
 								level0_fill_count = 0;
 								expected_obj_id_at_level1_start += (bpi.data_size / sizeof(blkptr_t)) * (bpi.data_size / sizeof(dnode_phys_t));
 							}
+							return true;
 						}
 						);
 				}
 
-				//try_read_direntry(*pool, results);
+				if (try_parse_as_direntry)
+					try_read_direntry(*pool, results);
 			}
 			else
 				std::cout << "Failed to parse decompression attempt " << attempt << " as indirect block" << std::endl ;
 		}
 		size_t level0_unallocated_count = 0;
 		size_t level0_allocated_count = 0;
-		if (try_parse_as_dmu_block)
-			dmu_block_idx += try_parse_data_as_dmu_block(pool, data.data(), data.size(), dmu_block_idx, level0_unallocated_count, level0_allocated_count);
 	}
 }
 
@@ -192,6 +157,7 @@ int main(int argc, const char** argv)
 
 		bool try_parse_as_indirect_block = false;
 		bool try_parse_as_dmu_block = false;
+		bool try_parse_as_direntry = false;
 		bool store_all = false;
 		std::string store_all_indirect_block_data_filename;
 
@@ -203,6 +169,7 @@ int main(int argc, const char** argv)
 			("store-all", po::value(&store_all)->implicit_value(true)->zero_tokens(), "store all raw and decompressed results")
 			("try-parse-as-indirect-block", po::value(&try_parse_as_indirect_block)->implicit_value(true)->zero_tokens(), "try parse as an indirect block")
 			("try-parse-as-dmu-block", po::value(&try_parse_as_dmu_block)->implicit_value(true)->zero_tokens(), "try parse as DMU block")
+			("try-parse-as-direntry", po::value(&try_parse_as_direntry)->implicit_value(true)->zero_tokens(), "try parse as direntry")
 			("store-all-indirect-block-data", po::value(&store_all_indirect_block_data_filename), "Filename to store data")
 			;
 
@@ -233,7 +200,7 @@ int main(int argc, const char** argv)
 			{
 				ROFile source_file(source);
 				std::vector<uint8_t> data = source_file.read();
-				try_decompress(pool.get(), data.data(), data.size(), source, store_all, try_parse_as_indirect_block, try_parse_as_dmu_block, out_file.get());
+				try_decompress(pool.get(), data.data(), data.size(), source, store_all, try_parse_as_indirect_block, try_parse_as_dmu_block, try_parse_as_direntry, out_file.get());
 			}
 			else
 			{
@@ -257,7 +224,7 @@ int main(int argc, const char** argv)
 					f.write(reinterpret_cast<const char*>(view.data()), view.size());
 				}
 
-				try_decompress(pool.get(), view.data(), view.size(), output_file_name, store_all, try_parse_as_indirect_block, try_parse_as_dmu_block, out_file.get());
+				try_decompress(pool.get(), view.data(), view.size(), output_file_name, store_all, try_parse_as_indirect_block, try_parse_as_dmu_block, try_parse_as_direntry, out_file.get());
 			}
 		}
 		return 0;
