@@ -1262,14 +1262,68 @@ namespace zfs_recover_tools
 		}
 	}
 
+	std::vector<block_pointer_info> get_child_bpis_from_indirect_block_pointer(zfs_pool& pool, const block_pointer_info& bpi)
+	{
+		std::vector<uint8_t> decompressed;
+		std::ostringstream errors;
+		if (is_zero(bpi.address[0]) && is_zero(bpi.address[1]) && is_zero(bpi.address[2]) && bpi.data_size != 0)
+			return {};
+		else
+		{
+			for (size_t addr_idx = 0; addr_idx != block_pointer_info::ADDR_COUNT; ++addr_idx)
+				if (is_valid(bpi.address[addr_idx]))
+				{
+					decompressed.clear();
+					data_view_t block = pool.get_block(bpi.address[addr_idx]);
+					try
+					{
+						decompress(bpi.compression_algo_idx, block.data(), block.size(), decompressed);
+						std::vector<block_pointer_info> child_bpis;
+						if (!try_parse_indirect_block(&pool, decompressed.data(), decompressed.size(), child_bpis))
+							throw std::runtime_error("Error parsing indirect block");
+						return child_bpis;
+					}
+					catch(const std::exception& e)
+					{
+						errors << "Error handling data at " << bpi << ", block size = " << block.size() << " - " << e.what() << std::endl ;
+					}
+				}
+		}
+		throw std::runtime_error(errors.str());
+	}
+
 	template<class Receiver>
 	bool read_data_from_block_pointer(zfs_pool& pool, const block_pointer_info& bpi, const Receiver& receiver)
 	{
 		std::vector<uint8_t> decompressed;
 		std::cout << "Reading from bpi: " << bpi << std::endl ;
+		std::ostringstream errors;
+
+		auto handle_data = [&bpi, &receiver, &pool](uint8_t* data, size_t size) -> bool
+			{
+				if (bpi.level == 0)
+					return receiver(data, size, bpi, std::string());
+				else
+				{
+					bool continue_reading = receiver(0, 0, bpi, std::string());
+					if (!continue_reading)
+						return false;
+					std::vector<block_pointer_info> child_bpis;
+					if (!try_parse_indirect_block(&pool, data, size, child_bpis))
+						throw std::runtime_error("Error parsing indirect block");
+					for (const block_pointer_info& child_bpi : child_bpis)
+					{
+						continue_reading = read_data_from_block_pointer(pool, child_bpi, receiver);
+						if (!continue_reading)
+							return false;
+					}
+					return true;
+				}
+			};
 		if (is_zero(bpi.address[0]) && is_zero(bpi.address[1]) && is_zero(bpi.address[2]) && bpi.data_size != 0)
 		{
 			decompressed.resize(bpi.data_size);
+			return handle_data(decompressed.data(), decompressed.size());
 		}
 		else
 		{
@@ -1281,41 +1335,16 @@ namespace zfs_recover_tools
 					try
 					{
 						decompress(bpi.compression_algo_idx, block.data(), block.size(), decompressed);
-						break;
+						return handle_data(decompressed.data(), decompressed.size());
 					}
 					catch(const std::exception& e)
 					{
-						if (addr_idx == block_pointer_info::ADDR_COUNT-1)
-						{
-							std::ostringstream err;
-							err << "Error decompressing data at " << bpi << ", block size = " << block.size() ;
-							throw std::runtime_error(err.str());
-						}
+						errors << "Error handling data at " << bpi << ", block size = " << block.size() << " - " << e.what() << std::endl ;
 					}
 				}
 		}
 
-		bool continue_reading;
-		if (bpi.level == 0)
-		{
-			continue_reading = receiver(decompressed.data(), decompressed.size(), bpi);
-		}
-		else
-		{
-			continue_reading = receiver(0, 0, bpi);
-			if (!continue_reading)
-				return false;
-			std::vector<block_pointer_info> child_bpis;
-			if (!try_parse_indirect_block(&pool, decompressed.data(), decompressed.size(), child_bpis))
-				throw std::runtime_error("Error parsing indirect block");
-			for (const block_pointer_info& child_bpi : child_bpis)
-			{
-				continue_reading = read_data_from_block_pointer(pool, child_bpi, receiver);
-				if (!continue_reading)
-					return false;
-			}
-		}
-		return continue_reading;
+		receiver(nullptr, bpi.data_size, bpi, errors.str());
 	}
 
 	template<class Receiver>
@@ -1358,22 +1387,8 @@ namespace zfs_recover_tools
 		return os;
 	}
 
-	void try_parse_data_as_dmu_block(zfs_pool* pool, const uint8_t* data, size_t size, size_t start_idx, size_t& unallocated_count, size_t& allocated_count, std::vector<dnode_phys_t>& out)
-	{
-		static_assert(sizeof(dnode_phys_t) == 512, "");
-		size_t count = size/512;
-		for (size_t i = 0; i != count; ++i)
-		{
-			const dnode_phys_t& node = get_mem_pod<dnode_phys_t>(data, i * 512, size);
-			out.push_back(node);
-			if (node.dn_type == DMU_OT_NONE)
-				++unallocated_count;
-			else
-				++allocated_count;
-		}
-	}
-
-	bool try_read_dmu_dnode(zfs_pool& pool, const zfs_data_address& dmu_root_addr, uint64_t obj_id, dnode_phys_t& result)
+	template<class Visitor>
+	void visit_dmu_dnodes(zfs_pool& pool, const zfs_data_address& dmu_root_addr, const Visitor& visitor)
 	{
 		data_view_t dmu_root_data = pool.get_block(dmu_root_addr);
 		zfs_decompressed_block_data_storage_t decompressed_data;
@@ -1397,89 +1412,171 @@ namespace zfs_recover_tools
 		if (results.empty())
 			throw std::runtime_error("Error parsing root dmu dnode indirect block pointer");
 
-		size_t dmu_block_idx = 0;
-
-		size_t level1_fill_count = 0;
-		size_t level0_unallocated_count = 0;
-		size_t level0_allocated_count = 0;
-		size_t level1_total_size = 0;
-		size_t level1_total_size_from_bpi = 0;
-		size_t level0_bpi_count = 0;
-		size_t level0_fill_count = 0;
-		size_t expected_obj_id_at_level1_start = 0;
-		std::vector<dnode_phys_t> dnodes;
-		bool found_result = false;
+		struct level_info
+		{
+			uint64_t level_idx = 0; // position at that level
+			uint64_t obj_id = 0; // starting object id at that level
+		};
+		std::vector<level_info> levels;
+		auto get_dnode_count_for_level = [](uint8_t level, size_t bpi_data_size)
+			{
+				uint64_t count = (bpi_data_size / sizeof(dnode_phys_t));
+				for (uint8_t i = 0; i != level; ++i)
+					count *= (bpi_data_size / sizeof(blkptr_t));
+				return count;
+			};
 		read_data_from_block_pointers(
 			pool,
 			results,
-			[&](const uint8_t* data, size_t size, const block_pointer_info& bpi) -> bool
+			[&](const uint8_t* data, size_t size, const block_pointer_info& bpi, const std::string& errors) -> bool
 			{
+				if (bpi.type != DMU_OT_DNODE)
+					throw std::runtime_error("Not a DMU node");
+
+				if (levels.size() <= bpi.level)
+					levels.resize(bpi.level+1);
+				for (size_t i = 0; i != bpi.level; ++i)
+					levels[i] = level_info{};
+				levels[bpi.level].obj_id = (bpi.level+1==levels.size() ? 0 : levels[bpi.level+1].obj_id) + get_dnode_count_for_level(bpi.level, bpi.data_size) * levels[bpi.level].level_idx;
+
 				if (bpi.level == 0)
 				{
-					level1_total_size_from_bpi += bpi.data_size;
-					level0_fill_count += bpi.fill_count;
-					level1_total_size += size;
-					++level0_bpi_count;
-					dnodes.clear();
-					try_parse_data_as_dmu_block(&pool, data, size, dmu_block_idx, level0_unallocated_count, level0_allocated_count, dnodes);
-					for (size_t i = 0; i != dnodes.size(); ++i)
+					uint64_t dmu_block_idx = levels[bpi.level].obj_id;
+					size_t count2 = size/512;
+					if (data == nullptr)
 					{
-						uint64_t idx = dmu_block_idx + i;
-						std::cout << "idx=" << idx << ", " << dnodes[i] << std::endl ;
-						if (idx == obj_id)
+						std::cerr << "ERRORS (sz=" << size << "): " << errors << std::endl ;
+					}
+					else
+					{
+						static_assert(sizeof(dnode_phys_t) == 512, "");
+						for (size_t dnode_idx = 0, count=size/512; dnode_idx != count; ++dnode_idx)
 						{
-							result = dnodes[i];
-							found_result = true;
-							std::cout << "Found result: " << result << std::endl ;
-							return false;
+							const dnode_phys_t& node = get_mem_pod<dnode_phys_t>(data, dnode_idx * 512, size);
+							uint64_t idx = dmu_block_idx + dnode_idx;
+							visitor(idx, node);
 						}
 					}
-					size_t count = dnodes.size();
-					size_t count2 = size/512;
-					dmu_block_idx += count;
-					if (count != count2)
-						fprintf(stderr, "count=%lu, count2=%lu\n", count, (size_t)count2);
-					//if (count != bpi.fill_count)
-//										throw std::runtime_error("foobar");
-					//dmu_block_idx += bpi.fill_count;
 				}
-				else if (bpi.level == 1)
-				{
-					if (expected_obj_id_at_level1_start != dmu_block_idx)
-					{
-						dmu_block_idx = expected_obj_id_at_level1_start;
-						printf("expected_obj_id_at_level1_start=%lu, dmu_block_idx=%lu\n", expected_obj_id_at_level1_start, dmu_block_idx);
-						//throw std::runtime_error("foobar");
-					}
-					printf(
-						"level0_unallocated_count=%lu, level1_fill_count=%lu, sum=%lu, level0_allocated_count=%lu, level1_total_size=%lu, level1_total_size_from_bpi=%lu, level0_bpi_count=%lu, level0_fill_count=%lu\n",
-						level0_unallocated_count,
-						level1_fill_count,
-						level1_fill_count+level0_unallocated_count,
-						level0_allocated_count,
-						level1_total_size,
-						level1_total_size_from_bpi,
-						level0_bpi_count,
-						level0_fill_count
-						);
-
-					level0_unallocated_count = 0;
-					level0_allocated_count = 0;
-					level1_fill_count = bpi.fill_count;
-					level1_total_size = 0;
-					level1_total_size_from_bpi = 0;
-					level0_bpi_count = 0;
-					level0_fill_count = 0;
-					expected_obj_id_at_level1_start += (bpi.data_size / sizeof(blkptr_t)) * (bpi.data_size / sizeof(dnode_phys_t));
-				}
+				++levels[bpi.level].level_idx;
 				return true;
 			}
 			);
-		return found_result;
 	}
 
-	void extract_filesystem_entry(zfs_pool& pool, const zfs_data_address& dmu_root, uint64_t obj_id)
+	void print_dmu_nodes(zfs_pool& pool, const zfs_data_address& dmu_root_addr)
 	{
+		visit_dmu_dnodes(
+			pool,
+			dmu_root_addr,
+			[](uint64_t obj_id, const dnode_phys_t& dnode)
+			{
+				std::cout << "idx=" << obj_id << ", " << dnode << std::endl ;
+			}
+			);
+	}
+
+	bool try_read_dmu_dnode(zfs_pool& pool, const zfs_data_address& dmu_root_addr, uint64_t obj_id, dnode_phys_t& result)
+	{
+		data_view_t dmu_root_data = pool.get_block(dmu_root_addr);
+		zfs_decompressed_block_data_storage_t decompressed_data;
+		try_decompress(dmu_root_data.data(), std::array<size_t, 1>{dmu_root_data.size()}, decompressed_data, nullptr);
+
+		size_t count = decompressed_data.decompressed_blocks.size();
+		const std::vector<decompressed_data_view_t>& decompressed_views = decompressed_data.decompressed_blocks;
+		if (count == 0)
+			throw std::runtime_error("All decompression attempts failed");
+
+		std::vector<block_pointer_info> results;
+
+		for (size_t attempt = 0; attempt != count; ++attempt)
+		{
+			results.clear();
+			decompressed_data_view_t data = decompressed_views[attempt];
+			bool success = try_parse_indirect_block(&pool, data.data(), data.size(), results);
+			if (success)
+				break;
+		}
+		if (results.empty())
+			throw std::runtime_error("Error parsing root dmu dnode indirect block pointer");
+
+		struct level_info
+		{
+			uint64_t level_idx = 0; // position at that level
+			uint64_t obj_id = 0; // starting object id at that level
+		};
+		std::vector<level_info> levels;
+		auto get_dnode_count_for_level = [](uint8_t level, size_t bpi_data_size)
+			{
+				uint64_t count = (bpi_data_size / sizeof(dnode_phys_t));
+				for (uint8_t i = 0; i != level; ++i)
+					count *= (bpi_data_size / sizeof(blkptr_t));
+				return count;
+			};
+
+		auto find_bpi_idx = [get_dnode_count_for_level](const std::vector<block_pointer_info>& bpis, uint64_t obj_id) -> size_t
+			{
+				for (size_t idx = 0; idx != bpis.size(); ++idx)
+				{
+					uint64_t dnode_count = get_dnode_count_for_level(bpis[idx].level, bpis[idx].data_size);
+					if (dnode_count*idx <= obj_id && obj_id < dnode_count*(idx+1))
+					{
+						return idx;
+					}
+				}
+				return bpis.size();
+			};
+
+		uint64_t obj_id_remainder = obj_id;
+		while (true)
+		{
+			size_t bpi_idx = find_bpi_idx(results, obj_id_remainder);
+			if (bpi_idx == results.size())
+				throw std::runtime_error("Internal error finding bpi idx");
+			obj_id_remainder -= get_dnode_count_for_level(results[bpi_idx].level, results[bpi_idx].data_size) * bpi_idx;
+			if (results[bpi_idx].level == 0)
+			{
+				const block_pointer_info& bpi = results[bpi_idx];
+				std::vector<uint8_t> decompressed;
+				if (is_zero(bpi.address[0]) && is_zero(bpi.address[1]) && is_zero(bpi.address[2]) && bpi.data_size != 0)
+					throw std::runtime_error("null bpi");
+				for (size_t addr_idx = 0; addr_idx != block_pointer_info::ADDR_COUNT; ++addr_idx)
+					if (is_valid(bpi.address[addr_idx]))
+					{
+						decompressed.clear();
+						data_view_t block = pool.get_block(bpi.address[addr_idx]);
+						try
+						{
+							decompress(bpi.compression_algo_idx, block.data(), block.size(), decompressed);
+							result = get_mem_pod<dnode_phys_t>(decompressed.data(), obj_id_remainder * 512, decompressed.size());
+							return true;
+						}
+						catch (const std::exception& e)
+						{
+						}
+					}
+				throw std::runtime_error("data error");
+			}
+			else
+				results = get_child_bpis_from_indirect_block_pointer(pool, results[bpi_idx]);
+		}
+		return false;
+	}
+
+	void extract_filesystem_entry(zfs_pool& pool, const zfs_data_address& dmu_root_addr, uint64_t obj_id)
+	{
+		dnode_phys_t dnode;
+		bool success = try_read_dmu_dnode(pool, dmu_root_addr, obj_id, dnode);
+		if (!success)
+			throw std::runtime_error("Can't find dnode for object " + std::to_string(obj_id));
+		if (dnode.dn_type == DMU_OT_DIRECTORY_CONTENTS)
+		{
+		}
+		else if (dnode.dn_type == DMU_OT_PLAIN_FILE_CONTENTS)
+		{
+		}
+		else
+			throw std::runtime_error("Unexpected dnode type: " + std::string(bpi_type_to_string(dnode.dn_type)));
 	}
 
 }

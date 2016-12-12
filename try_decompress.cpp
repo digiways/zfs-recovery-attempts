@@ -84,7 +84,7 @@ void try_decompress(
 									for (size_t i = 0; i != dnodes.size(); ++i)
 									{
 										uint64_t idx = dmu_block_idx + i;
-										std::cout << "idx=" << idx << dnodes[i] << std::endl ;
+										std::cout << "idx=" << idx << ", " << dnodes[i] << std::endl ;
 									}
 									size_t count = dnodes.size();
 									size_t count2 = size/512;

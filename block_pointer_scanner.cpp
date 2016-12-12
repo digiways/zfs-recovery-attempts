@@ -518,7 +518,7 @@ int main(int argc, const char** argv)
 			bool success = try_read_dmu_dnode(*pool, dmu_root, object_index, dnode);
 			if (!success)
 			{
-				throw std::runtime_error("Error reading dnode");
+				throw std::runtime_error("Error reading dnode, dnode with index=" + std::to_string(object_index) + " not found");
 			}
 			std::cout << dnode << std::endl ;
 			return 0;
