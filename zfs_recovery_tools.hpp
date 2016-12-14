@@ -169,7 +169,7 @@ namespace zfs_recover_tools
 	template<class POD, class Adaptor>
 	inline void print_integer_array(std::ostream& os, const IntegerArray& ze, const Adaptor& adaptor)
 	{
-		os << "IntegerArray<" << sizeof(POD) << "bit>{";
+		os << "IntegerArray<" << (sizeof(POD)*8) << "bit>{";
 		const POD* data = ze.data<POD>();
 		for (size_t i = 0; i != ze.size(); ++i)
 		{
@@ -200,6 +200,10 @@ namespace zfs_recover_tools
 		zap_entry(std::string&& n, IntegerArray&& i) : name(std::move(n)), value(std::move(i)) {}
 		std::string name;
 		IntegerArray value;
+		uint64_t get_object_id() const
+		{
+			return value.data<uint64_t>()[0]&0xFFFFFFF;
+		}
 	};
 
 	inline std::ostream& operator << (std::ostream& os, const zap_entry& ze)
@@ -214,12 +218,15 @@ namespace zfs_recover_tools
 	{
 		const zap_phys_t& header = get_mem_pod<zap_phys_t>(ptr, 0, length);
 
-	    if (header.zap_block_type != ZBT_HEADER)
+	    if (header.zap_block_type != ZBT_HEADER && header.zap_block_type != ZBT_MICRO)
 	        throw std::runtime_error("not a header (zap_block_type is not ZBT_HEADER)");
 	    if (header.zap_magic != ZAP_MAGIC)
 	        throw std::runtime_error("Wrong magic");
 	    if (header.zap_num_entries > 100000)
 	    	throw std::runtime_error("Too many entries in directory: " + std::to_string(header.zap_num_entries));
+
+    	if (header.zap_block_type != ZBT_MICRO)
+    		throw std::runtime_error("Micro ZAP not supported yet");
 
 	    std::vector<zap_entry> ret;
 	    ret.reserve(header.zap_num_entries);
@@ -1299,7 +1306,7 @@ namespace zfs_recover_tools
 		std::cout << "Reading from bpi: " << bpi << std::endl ;
 		std::ostringstream errors;
 
-		auto handle_data = [&bpi, &receiver, &pool](uint8_t* data, size_t size) -> bool
+		auto handle_data = [&bpi, &receiver, &pool](const uint8_t* data, size_t size) -> bool
 			{
 				if (bpi.level == 0)
 					return receiver(data, size, bpi, std::string());
@@ -1334,8 +1341,15 @@ namespace zfs_recover_tools
 					data_view_t block = pool.get_block(bpi.address[addr_idx]);
 					try
 					{
-						decompress(bpi.compression_algo_idx, block.data(), block.size(), decompressed);
-						return handle_data(decompressed.data(), decompressed.size());
+						if (bpi.compression_algo_idx == ZIO_COMPRESS_OFF)
+						{
+							return handle_data(block.data(), block.size());
+						}
+						else
+						{
+							decompress(bpi.compression_algo_idx, block.data(), block.size(), decompressed);
+							return handle_data(decompressed.data(), decompressed.size());
+						}
 					}
 					catch(const std::exception& e)
 					{
@@ -1366,6 +1380,7 @@ namespace zfs_recover_tools
 			<< ", dn_indblkshift=" << (int)dnode.dn_indblkshift
 			<< ", dn_datablkszsec=" << (int)dnode.dn_datablkszsec
 			<< ", flags=" << (int)dnode.dn_flags
+			<< ", bpi_count=" << (int)dnode.dn_nblkptr
 			<< "}";
 
 
@@ -1563,17 +1578,83 @@ namespace zfs_recover_tools
 		return false;
 	}
 
-	void extract_filesystem_entry(zfs_pool& pool, const zfs_data_address& dmu_root_addr, uint64_t obj_id)
+	void extract_filesystem_entry(zfs_pool& pool, const zfs_data_address& dmu_root_addr, uint64_t obj_id, const std::string& dest_path)
 	{
 		dnode_phys_t dnode;
-		bool success = try_read_dmu_dnode(pool, dmu_root_addr, obj_id, dnode);
-		if (!success)
-			throw std::runtime_error("Can't find dnode for object " + std::to_string(obj_id));
+		try
+		{
+			bool success = try_read_dmu_dnode(pool, dmu_root_addr, obj_id, dnode);
+			if (!success)
+				throw std::runtime_error("Can't find dnode for object " + std::to_string(obj_id));
+		}
+		catch(const std::exception& e)
+		{
+			std::cerr << e.what() << std::endl ;
+			return;
+		}
+		std::vector<block_pointer_info> bpis;
+		for (size_t blkptr_idx = 0; blkptr_idx != dnode.dn_nblkptr; ++blkptr_idx)
+		{
+			const blkptr_t& blkptr = dnode.dn_blkptr[blkptr_idx];
+			block_pointer_info bpi;
+			if (try_parse_block_pointer(&pool, blkptr, bpi) == -1)
+			{
+				std::ostringstream err;
+				err << "fatal error paring block pointer from dnode " << dnode;
+				std::cout << err.str() << std::endl ;
+				return;
+				//throw std::runtime_error(err.str());
+			}
+			bpis.push_back(bpi);
+			std::cout << "bpi " << bpi << std::endl ;
+		}
 		if (dnode.dn_type == DMU_OT_DIRECTORY_CONTENTS)
 		{
+			::mkdir(dest_path.c_str(), S_IRWXU | S_IRWXG | S_IROTH | S_IXOTH);
+			std::vector<uint8_t> direntry_data;
+			read_data_from_block_pointers(
+				pool,
+				bpis,
+				[&](const uint8_t* data, size_t size, const block_pointer_info& bpi, const std::string& error)
+				{
+					if (bpi.level == 0)
+						direntry_data.insert(direntry_data.end(), data, data+size);
+					return true;
+				}
+				);
+			std::vector<zap_entry> entries = parse_fat(direntry_data.data(), direntry_data.size(), direntry_data.size());
+			for (const zap_entry& entry : entries)
+			{
+				std::cout << "Entry: " << entry << std::endl ;
+				std::string path = dest_path;
+				if (path.empty() || path.back() != '/')
+					path += '/';
+				path += entry.name;
+				extract_filesystem_entry(pool, dmu_root_addr, entry.get_object_id(), path);
+			}
+			std::cout << "got directory [obj_id=" << obj_id << "]" << std::endl ;
 		}
 		else if (dnode.dn_type == DMU_OT_PLAIN_FILE_CONTENTS)
 		{
+			std::cout << "got file [obj_id=" << obj_id << "]" << std::endl ;
+			RWFile dest_file(dest_path, RWFile::ALWAYS_CREATE_EMPTY_NEW);
+			read_data_from_block_pointers(
+				pool,
+				bpis,
+				[&dest_file](const uint8_t* data, size_t size, const block_pointer_info& bpi, const std::string& errors) -> bool
+				{
+					if (bpi.level == 0)
+					{
+						if (data == nullptr && !errors.empty())
+						{
+							std::cerr << "Error saving " << dest_file.filename() << " - " << errors << std::endl ;
+							return false;
+						}
+						dest_file.write(data, size);
+						return true;
+					}
+				}
+				);
 		}
 		else
 			throw std::runtime_error("Unexpected dnode type: " + std::string(bpi_type_to_string(dnode.dn_type)));

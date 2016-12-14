@@ -451,6 +451,8 @@ int main(int argc, const char** argv)
 		uint64_t object_index = 0;
 		std::string dmu_root_addr;
 		bool print_dnode_with_object_index = false;
+		bool extract_file_system_entry = false;
+		std::string dest_path;
 
 		po::options_description desc("Allowed options");
 		desc.add_options()
@@ -470,6 +472,8 @@ int main(int argc, const char** argv)
 			("object-index", po::value(&object_index), "object index")
 			("dmu-root-addr", po::value(&dmu_root_addr), "DMU root address")
 			("print-dnode-with-object-index", po::value(&print_dnode_with_object_index)->implicit_value(true)->zero_tokens(), "print dnode with object index")
+			("extract-file-system-entry", po::value(&extract_file_system_entry)->implicit_value(true)->zero_tokens(), "extract file system entry with given object index and dmu root")
+			("dest-path", po::value(&dest_path), "Dest path")
 			;
 
 		po::variables_map vm;
@@ -504,11 +508,20 @@ int main(int argc, const char** argv)
 			dva_to_find_references_for.insert(dva_to_find_references_for.end(), addresses.begin(), addresses.end());
 		}
 
-		if (try_read_direntries || scan_dnodes || print_dnode_with_object_index)
+		if (try_read_direntries || scan_dnodes || print_dnode_with_object_index || extract_file_system_entry)
 		{
 			if (!pool_config)
 				throw std::runtime_error("--zfs-cfg is missing but required to read direntries");
 			pool.reset(new zfs_pool(*pool_config));
+		}
+
+		if (extract_file_system_entry)
+		{
+			zfs_data_address dmu_root = parse_zfs_data_addr_string(dmu_root_addr);
+			if (dest_path.empty())
+				throw std::runtime_error("--dest-path is not set");
+			extract_filesystem_entry(*pool, dmu_root, object_index, dest_path);
+			return 0;
 		}
 
 		if (print_dnode_with_object_index)

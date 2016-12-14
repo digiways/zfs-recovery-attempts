@@ -104,6 +104,13 @@ namespace zfs_recover_tools
 		void write(const void* src, size_t size)
 		{
 			int res = ::write(handle_, src, size);
+			if (res == -1)
+			{
+				int err_no = errno;
+				char err_str_buf[1024];
+				char* err_str = ::strerror_r(err_no, err_str, sizeof(err_str));
+				throw std::runtime_error("Error writing " + std::to_string(size) + " bytes to file '" + filename_ + "': " + err_str);
+			}
 			if (res != size)
 				throw std::runtime_error("Error writing " + std::to_string(size) + " bytes to file '" + filename_ + "'");
 			pos_ += size;
