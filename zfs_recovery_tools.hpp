@@ -73,7 +73,7 @@ namespace zfs_recover_tools
 		struct pod_type {};
 
 		template<class POD>
-		explicit IntegerArray(const pod_type<POD>& type) : element_size_(sizeof(POD)) {}
+		explicit IntegerArray(const pod_type<POD>& type, size_t size) : element_size_(sizeof(POD)) { data_.resize(size * sizeof(POD)); }
 
 		explicit IntegerArray(const pod_type<uint8_t>& type, std::vector<uint8_t>&& data) : element_size_(sizeof(uint8_t)), data_(std::move(data)) {}
 		explicit IntegerArray(const pod_type<uint16_t>& type, std::vector<uint8_t>&& data) : element_size_(sizeof(uint16_t)), data_(std::move(data)) { byte_swap_all<uint16_t>(); }
@@ -90,6 +90,14 @@ namespace zfs_recover_tools
 			if (sizeof(POD) != element_size_)
 				throw std::runtime_error("POD Array element size error");
 			return reinterpret_cast<const POD*>(data_.data());
+		}
+
+		template<class POD>
+		POD* data()
+		{
+			if (sizeof(POD) != element_size_)
+				throw std::runtime_error("POD Array element size error");
+			return reinterpret_cast<POD*>(data_.data());
 		}
 
 	private:
@@ -218,15 +226,28 @@ namespace zfs_recover_tools
 	{
 		const zap_phys_t& header = get_mem_pod<zap_phys_t>(ptr, 0, length);
 
-	    if (header.zap_block_type != ZBT_HEADER && header.zap_block_type != ZBT_MICRO)
+    	if (header.zap_block_type == ZBT_MICRO)
+    	{
+    		const mzap_phys_t& mzap_header = get_mem_pod<mzap_phys_t>(ptr, 0, length);
+    		std::vector<zap_entry> results;
+    		for (size_t i = 0; i != (length-sizeof(mzap_phys_t))/sizeof(mzap_ent_phys_t)+1; ++i)
+    		{
+    			if (mzap_header.mz_chunk[i].mze_name && mzap_header.mz_chunk[i].mze_value)
+    			{
+    				IntegerArray obj_id(IntegerArray::pod_type<uint64_t>(), 1);
+    				obj_id.data<uint64_t>()[0] = mzap_header.mz_chunk[i].mze_value;
+    				results.emplace_back(mzap_header.mz_chunk[i].mze_name, std::move(obj_id));
+    			}
+    		}
+    		return results;
+   		}
+
+	    if (header.zap_block_type != ZBT_HEADER)
 	        throw std::runtime_error("not a header (zap_block_type is not ZBT_HEADER)");
 	    if (header.zap_magic != ZAP_MAGIC)
 	        throw std::runtime_error("Wrong magic");
 	    if (header.zap_num_entries > 100000)
 	    	throw std::runtime_error("Too many entries in directory: " + std::to_string(header.zap_num_entries));
-
-    	if (header.zap_block_type != ZBT_MICRO)
-    		throw std::runtime_error("Micro ZAP not supported yet");
 
 	    std::vector<zap_entry> ret;
 	    ret.reserve(header.zap_num_entries);
