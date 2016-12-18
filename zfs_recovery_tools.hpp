@@ -27,6 +27,7 @@
 #include <sys/zio_checksum.h>
 #include <sys/zio_compress.h>
 #include <sys/dnode.h>
+#include <sys/blkptr.h>
 #undef class
 #undef private
 
@@ -243,7 +244,7 @@ namespace zfs_recover_tools
    		}
 
 	    if (header.zap_block_type != ZBT_HEADER)
-	        throw std::runtime_error("not a header (zap_block_type is not ZBT_HEADER)");
+	        throw std::runtime_error("not a header (zap_block_type is not ZBT_HEADER), length=" + std::to_string(length));
 	    if (header.zap_magic != ZAP_MAGIC)
 	        throw std::runtime_error("Wrong magic");
 	    if (header.zap_num_entries > 100000)
@@ -558,6 +559,8 @@ namespace zfs_recover_tools
 		uint64_t tgx = 0;
 		uint32_t fill_count = 0;
 		uint64_t data_size = 0;
+		bool embedded = false;
+		std::vector<uint8_t> embedded_data;
 	};
 
 	inline bool operator == (const block_pointer_info& lhs, const block_pointer_info& rhs)
@@ -565,12 +568,15 @@ namespace zfs_recover_tools
 		return memcmp(&lhs, &rhs, sizeof(block_pointer_info)) == 0;
 	}
 
-	const char* bpi_type_to_string(uint8_t bpi_type)
+	const char* bpi_type_to_string(uint8_t type)
 	{
-		if (bpi_type < DMU_OT_NUMTYPES)
-			return dmu_ot[bpi_type].ot_name;
+		if (type < DMU_OT_NUMTYPES)
+			return (dmu_ot[type].ot_name);
+		else if ((type & DMU_OT_NEWTYPE) &&
+			((type & DMU_OT_BYTESWAP_MASK) < DMU_BSWAP_NUMFUNCS))
+			return (dmu_ot_byteswap[type & DMU_OT_BYTESWAP_MASK].ob_name);
 		else
-			return "INVALID";
+			return ("UNKNOWN");
 	}
 
 	std::ostream& operator << (std::ostream& os, const block_pointer_info& info)
@@ -596,11 +602,50 @@ namespace zfs_recover_tools
 			os << ", type=INVALID[" << (unsigned)info.type << ']';
 		os << ", tgx=" << std::dec << info.tgx ;
 		os << ", fill_count=" << info.fill_count ;
+		os << ", embedded=" << (info.embedded ? "True" : "False") ;
 		os << ", data_size=" << info.data_size ;
 		os << "}" ;
 
 		return os;
 	}
+
+	std::ostream& operator << (std::ostream& os, const blkptr_t& ptr)
+	{
+		os
+			<< "{checksum=" << BP_GET_CHECKSUM(&ptr);
+
+		int compression_algo_idx = BP_GET_COMPRESS(&ptr);
+		if (compression_algo_idx < ZIO_COMPRESS_FUNCTIONS)
+			os << ", compr=" << zio_compress_table[compression_algo_idx].ci_name;
+		else
+			os << ", compr=INVALID[" << (unsigned)compression_algo_idx << ']';
+
+		os
+			<< ", type=" << bpi_type_to_string(BP_GET_TYPE(&ptr))
+			<< ", level=" << (int)BP_GET_LEVEL(&ptr)
+			<< ", tgx=" << BP_PHYSICAL_BIRTH(&ptr)
+			<< ", fill_count=" << BP_GET_FILL(&ptr)
+			<< ", data_size=" << BP_GET_LSIZE(&ptr)
+			<< ", is_hole=" << BP_IS_HOLE(&ptr)
+			<< ", embedded=" << BP_IS_EMBEDDED(&ptr)
+			;
+		if (BP_IS_EMBEDDED(&ptr))
+			os << ", embedded_type=" << int(BPE_GET_ETYPE(&ptr)) ;
+
+		for (size_t dva_idx = 0; dva_idx != SPA_DVAS_PER_BP; ++dva_idx)
+		{
+			uint32_t vdev_id = DVA_GET_VDEV(&ptr.blk_dva[dva_idx]);
+			uint64_t offset = (DVA_GET_OFFSET(&ptr.blk_dva[dva_idx]) >> SPA_MINBLOCKSHIFT);
+			uint64_t size = DVA_GET_ASIZE(&ptr.blk_dva[dva_idx]);
+			int grid = DVA_GET_GRID(&ptr.blk_dva[dva_idx]);
+			bool is_gang = DVA_GET_GANG(&ptr.blk_dva[dva_idx]);
+			os << " {vdev=" << vdev_id << ",offset=" << offset << ",size=" << size << ",gang=" << is_gang << ", grid=" << grid << "}";
+		}
+		os << "}";
+
+		return os;
+	}
+
 
 	class zfs_pool
 	{
@@ -804,11 +849,22 @@ namespace zfs_recover_tools
 		info.compression_algo_idx = BP_GET_COMPRESS(&ptr);
 		info.level = BP_GET_LEVEL(&ptr);
 		info.type = BP_GET_TYPE(&ptr);
-		info.tgx = BP_PHYSICAL_BIRTH(&ptr);
 		info.fill_count = BP_GET_FILL(&ptr);
-		info.data_size = BP_GET_LSIZE(&ptr);
+		info.embedded = BP_IS_EMBEDDED(&ptr);
+		info.tgx = BP_PHYSICAL_BIRTH(&ptr);
+		if (info.embedded)
+		{
+			info.data_size = BPE_GET_LSIZE(&ptr);
+			size_t embedded_data_size = BPE_GET_PSIZE(&ptr);
+			info.embedded_data.resize(embedded_data_size);
+			decode_embedded_bp_compressed(&ptr, info.embedded_data.data());
+			std::vector<uint8_t> tmp = std::move(info.embedded_data);
+			decompress(info.compression_algo_idx, tmp.data(), tmp.size(), info.embedded_data);
+		}
+		else
+			info.data_size = BP_GET_LSIZE(&ptr);
 
-		if (!(BP_IS_HOLE(&ptr)))
+		if (!(BP_IS_HOLE(&ptr)) && !(BP_IS_EMBEDDED(&ptr)))
 		{
 			std::array<uint64_t, SPA_DVAS_PER_BP> offsets;
 			for (size_t dva_idx = 0; dva_idx != SPA_DVAS_PER_BP; ++dva_idx)
@@ -1348,7 +1404,13 @@ namespace zfs_recover_tools
 					return true;
 				}
 			};
-		if (is_zero(bpi.address[0]) && is_zero(bpi.address[1]) && is_zero(bpi.address[2]) && bpi.data_size != 0)
+		if (bpi.embedded)
+		{
+			if (bpi.embedded_data.empty())
+				throw std::runtime_error("Internal error, empty embedded data");
+			return receiver(bpi.embedded_data.data(), bpi.embedded_data.size(), bpi, std::string());
+		}
+		else if (is_zero(bpi.address[0]) && is_zero(bpi.address[1]) && is_zero(bpi.address[2]) && bpi.data_size != 0)
 		{
 			decompressed.resize(bpi.data_size);
 			return handle_data(decompressed.data(), decompressed.size());
@@ -1395,13 +1457,19 @@ namespace zfs_recover_tools
 
 	std::ostream& operator << (std::ostream& os, const dnode_phys_t& dnode)
 	{
-		os << "dnode_phys_t{type: " << dmu_ot[dnode.dn_type].ot_name
-			<< ", dn_extra_slots=" << (int)dnode.dn_extra_slots
-			<< ", bonustype=" << (int)dnode.dn_bonustype
-			<< ", dn_indblkshift=" << (int)dnode.dn_indblkshift
-			<< ", dn_datablkszsec=" << (int)dnode.dn_datablkszsec
+		os << "dnode_phys_t{type: " << dmu_ot[dnode.dn_type].ot_name << "[" << (int)dnode.dn_type << "]"
+			<< ", indblkshift=" << (int)dnode.dn_indblkshift
+			<< ", nlevels=" << (int)dnode.dn_nlevels
+			<< ", nblkptr=" << (int)dnode.dn_nblkptr
+			<< ", bonustype=" << dmu_ot[dnode.dn_bonustype].ot_name << "[" << (int)dnode.dn_bonustype << "]"
+			<< ", checksum=" << (int)dnode.dn_checksum
+			<< ", compress=" << (int)dnode.dn_compress
 			<< ", flags=" << (int)dnode.dn_flags
-			<< ", bpi_count=" << (int)dnode.dn_nblkptr
+			<< ", datablkszsec=" << (int)dnode.dn_datablkszsec
+			<< ", bonuslen=" << (int)dnode.dn_bonuslen
+			<< ", extra_slots=" << (int)dnode.dn_extra_slots
+			<< ", maxblkid=" << (int)dnode.dn_maxblkid
+			<< ", used=" << (int)dnode.dn_used
 			<< "}";
 
 
@@ -1413,10 +1481,17 @@ namespace zfs_recover_tools
 				int parse_res = try_parse_block_pointer(nullptr, dnode.dn_blkptr[i], info);
 				if (parse_res > 0)
 				{
+					os << "{" << info << "}";
+					/*
 					for (const zfs_data_address& addr : info.address)
 						if (is_valid(addr))
-							std::cout << "{" << addr << "}";
+							os << "{" << addr << "}";
+						else
+							os << "{NULL-ADDRESS}";
+							*/
 				}
+				else
+					os << "{PARSE-RES=" << parse_res << "}[" << dnode.dn_blkptr[i] << "]";
 			}
 		}
 
@@ -1512,7 +1587,8 @@ namespace zfs_recover_tools
 			);
 	}
 
-	bool try_read_dmu_dnode(zfs_pool& pool, const zfs_data_address& dmu_root_addr, uint64_t obj_id, dnode_phys_t& result)
+	// can be more than one result if there is more than one copy of that node
+	bool try_read_dmu_dnode(zfs_pool& pool, const zfs_data_address& dmu_root_addr, uint64_t obj_id, std::vector<dnode_phys_t>& result)
 	{
 		data_view_t dmu_root_data = pool.get_block(dmu_root_addr);
 		zfs_decompressed_block_data_storage_t decompressed_data;
@@ -1575,7 +1651,11 @@ namespace zfs_recover_tools
 				const block_pointer_info& bpi = results[bpi_idx];
 				std::vector<uint8_t> decompressed;
 				if (is_zero(bpi.address[0]) && is_zero(bpi.address[1]) && is_zero(bpi.address[2]) && bpi.data_size != 0)
-					throw std::runtime_error("null bpi");
+				{
+					std::ostringstream err;
+					err << "Encountered null bpi while reading dnode " << obj_id << ": " << bpi ;
+					throw std::runtime_error(err.str());
+				}
 				for (size_t addr_idx = 0; addr_idx != block_pointer_info::ADDR_COUNT; ++addr_idx)
 					if (is_valid(bpi.address[addr_idx]))
 					{
@@ -1584,14 +1664,14 @@ namespace zfs_recover_tools
 						try
 						{
 							decompress(bpi.compression_algo_idx, block.data(), block.size(), decompressed);
-							result = get_mem_pod<dnode_phys_t>(decompressed.data(), obj_id_remainder * 512, decompressed.size());
-							return true;
+							result.push_back(get_mem_pod<dnode_phys_t>(decompressed.data(), obj_id_remainder * 512, decompressed.size()));
+							std::cout << "Read dnode_phys_t for obj_id " << obj_id << " from " << bpi.address[addr_idx] << " at offset=" << (obj_id_remainder*512) << ", id=" << obj_id_remainder << std::endl ;
 						}
 						catch (const std::exception& e)
 						{
 						}
 					}
-				throw std::runtime_error("data error");
+				return !result.empty();
 			}
 			else
 				results = get_child_bpis_from_indirect_block_pointer(pool, results[bpi_idx]);
@@ -1599,21 +1679,46 @@ namespace zfs_recover_tools
 		return false;
 	}
 
+	// Maybe our decompression is broken, try their decompression function
+
 	void extract_filesystem_entry(zfs_pool& pool, const zfs_data_address& dmu_root_addr, uint64_t obj_id, const std::string& dest_path)
 	{
-		dnode_phys_t dnode;
+		std::vector<dnode_phys_t> dnodes;
 		try
 		{
-			bool success = try_read_dmu_dnode(pool, dmu_root_addr, obj_id, dnode);
+			bool success = try_read_dmu_dnode(pool, dmu_root_addr, obj_id, dnodes);
 			if (!success)
 				throw std::runtime_error("Can't find dnode for object " + std::to_string(obj_id));
 		}
 		catch(const std::exception& e)
 		{
-			std::cerr << e.what() << std::endl ;
+			std::cerr << "Error extracting filesystem entry " << dest_path << " - " << e.what() << std::endl ;
 			return;
 		}
+		for (const dnode_phys_t& dnode : dnodes)
+			std::cout << "Got dnode for obj " << obj_id << " (" << dest_path << ") - " << dnode << std::endl ;
 		std::vector<block_pointer_info> bpis;
+		dnodes.erase(
+			std::remove_if(
+				dnodes.begin(),
+				dnodes.end(),
+				[&pool](const dnode_phys_t& dnode)
+				{
+					block_pointer_info bpi;
+					for (size_t blkptr_idx = 0; blkptr_idx != dnode.dn_nblkptr; ++blkptr_idx)
+						if (try_parse_block_pointer(&pool, dnode.dn_blkptr[blkptr_idx], bpi) == -1)
+							return true;
+					return false;
+				}
+				),
+			dnodes.end()
+			);
+		if (dnodes.empty())
+		{
+			std::cout << "No valid dnodes found for obj_id " << obj_id << " for " << dest_path << std::endl ;
+			return;
+		}
+		const dnode_phys_t& dnode = dnodes.front();
 		for (size_t blkptr_idx = 0; blkptr_idx != dnode.dn_nblkptr; ++blkptr_idx)
 		{
 			const blkptr_t& blkptr = dnode.dn_blkptr[blkptr_idx];
@@ -1621,7 +1726,7 @@ namespace zfs_recover_tools
 			if (try_parse_block_pointer(&pool, blkptr, bpi) == -1)
 			{
 				std::ostringstream err;
-				err << "fatal error paring block pointer from dnode " << dnode;
+				err << "fatal error parsing block pointer from dnode " << dnode;
 				std::cout << err.str() << std::endl ;
 				return;
 				//throw std::runtime_error(err.str());
@@ -1671,11 +1776,15 @@ namespace zfs_recover_tools
 							std::cerr << "Error saving " << dest_file.filename() << " - " << errors << std::endl ;
 							return false;
 						}
+						if (size == 0)
+							std::cerr << "Error: Writing zero bytes to file: " << dest_file.filename() << std::endl ;
 						dest_file.write(data, size);
-						return true;
 					}
+					return true;
 				}
 				);
+			if (dest_file.get_position() == 0)
+				std::cerr << "Error: Nothing was written to file: " << dest_file.filename() << std::endl ;
 		}
 		else
 			throw std::runtime_error("Unexpected dnode type: " + std::string(bpi_type_to_string(dnode.dn_type)));

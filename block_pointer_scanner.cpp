@@ -527,13 +527,14 @@ int main(int argc, const char** argv)
 		if (print_dnode_with_object_index)
 		{
 			zfs_data_address dmu_root = parse_zfs_data_addr_string(dmu_root_addr);
-			dnode_phys_t dnode;
-			bool success = try_read_dmu_dnode(*pool, dmu_root, object_index, dnode);
+			std::vector<dnode_phys_t> dnodes;
+			bool success = try_read_dmu_dnode(*pool, dmu_root, object_index, dnodes);
 			if (!success)
 			{
 				throw std::runtime_error("Error reading dnode, dnode with index=" + std::to_string(object_index) + " not found");
 			}
-			std::cout << dnode << std::endl ;
+			for (const dnode_phys_t& dnode : dnodes)
+				std::cout << dnode << std::endl ;
 			return 0;
 		}
 
