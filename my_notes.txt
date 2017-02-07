@@ -1,9 +1,19 @@
 dev stuff:
 http://wiki.dreamrunner.org/public_html/Low_Latency_Programming/low-latency-programming.html
 https://lwn.net/Articles/250967/
+https://lwn.net/Articles/255364/
 https://www.kernel.org/doc/Documentation/trace/tracepoints.txt
 http://thenewstack.io/long-last-linux-gets-dynamic-tracing/
 http://www.brendangregg.com/perf.html
+https://software.intel.com/en-us/articles/pin-a-dynamic-binary-instrumentation-tool
+http://www.agner.org/optimize/microarchitecture.pdf
+https://fgiesen.wordpress.com/2014/07/07/cache-coherency/
+https://mechanical-sympathy.blogspot.co.uk/2013/02/cpu-cache-flushing-fallacy.html
+https://github.com/darksideos/darkside-kernel/issues/1392
+http://www.intel.com/Assets/en_US/PDF/manual/253668.pdf
+https://en.wikipedia.org/wiki/Translation_lookaside_buffer
+https://www.thomas-krenn.com/en/wiki/Linux_Page_Cache_Basics
+
 
 math:
 http://www.oxfordstrat.com/trading-strategies/linear-regression/
