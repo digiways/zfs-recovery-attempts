@@ -1,0 +1,10 @@
+dev stuff:
+http://wiki.dreamrunner.org/public_html/Low_Latency_Programming/low-latency-programming.html
+https://lwn.net/Articles/250967/
+https://www.kernel.org/doc/Documentation/trace/tracepoints.txt
+http://thenewstack.io/long-last-linux-gets-dynamic-tracing/
+http://www.brendangregg.com/perf.html
+
+math:
+http://www.oxfordstrat.com/trading-strategies/linear-regression/
+https://onlinecourses.science.psu.edu/stat501/node/250
