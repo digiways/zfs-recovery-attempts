@@ -19,8 +19,13 @@ math:
 http://www.oxfordstrat.com/trading-strategies/linear-regression/
 https://onlinecourses.science.psu.edu/stat501/node/250
 
-
-
+other:
+https://www.youngliving.com/en_GB/products/idaho-blue-spruce
+https://github.com/Fneufneu/zfs_read/blob/master/zfsimpl.c#L1560
+https://www.washingtonpost.com/news/wonk/wp/2016/03/18/why-smart-people-are-better-off-with-fewer-friends/
+https://news.slashdot.org/story/16/01/22/2232248/google-launches-free-course-on-deep-learning
+https://ask.slashdot.org/story/15/12/28/1745237/ask-slashdot-how-to-get-into-machine-learning
+https://tresorit.com/download/linux
 
 There are many links and info, like this one:
 
