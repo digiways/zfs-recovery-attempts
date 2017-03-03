@@ -36,3 +36,17 @@ For the work we do , it would be very easy to justify as valid R&D. (This is in 
 You just need to go through the pain of filling the forms and justification.
 
 I’m sure all those hedge funds, fintech start-ups, etc would be taking advantage  of it
+
+
+
+
+Links last:
+https://github.com/AOKP/external_f2fs-tools/blob/kitkat/fsck/dump.c
+https://github.com/jeppeter/f2fs/tree/master/fs/f2fs
+https://www.kernel.org/doc/Documentation/filesystems/f2fs.txt
+https://lwn.net/Articles/518988/
+https://events.linuxfoundation.org/images/stories/pdf/klf2012_j_kim.pdf
+
+https://github.com/Fneufneu/zfs_read/blob/master/zfsimpl.c#L1560
+https://developers.slashdot.org/story/17/02/16/161259/google-releases-tensorflow-10-with-new-machine-learning-tools
+https://www.lumendatabase.org/notices/search
